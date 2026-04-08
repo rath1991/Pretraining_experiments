@@ -1,0 +1,17 @@
+# Datasets (large binary files)
+data/fineweb_edu/
+data/pile/
+
+# Checkpoints and TensorBoard logs
+out/
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
