@@ -19,17 +19,33 @@ def get_lr(step: int, cfg: TrainConfig) -> float:
 
 
 @torch.no_grad()
-def eval_val_loss(model: GPT, val_set, tcfg: TrainConfig) -> float:
+def eval_val_loss(model: GPT, val_set, tcfg: TrainConfig):
     model.eval()
     dtype = torch.bfloat16 if tcfg.bf16 else torch.float32
+
+    # online activation stats via hook on ln_f (final LayerNorm output)
+    stats = {"sum": 0.0, "sq_sum": 0.0, "count": 0}
+    def _hook(module, input, output):
+        o = output.detach().float()
+        stats["sum"]    += o.sum().item()
+        stats["sq_sum"] += (o ** 2).sum().item()
+        stats["count"]  += o.numel()
+    hook = model.transformer.ln_f.register_forward_hook(_hook)
+
     losses = []
     for _ in range(tcfg.eval_steps):
         x, y = val_set.get_batch(tcfg.batch_size, tcfg.device)
         with torch.autocast(device_type="cuda", dtype=dtype):
             _, loss = model(x, y)
         losses.append(loss.item())
+    hook.remove()
+
+    act_mean = stats["sum"] / stats["count"]
+    act_var  = stats["sq_sum"] / stats["count"] - act_mean ** 2
+    act_std  = act_var ** 0.5
+
     model.train()
-    return sum(losses) / len(losses)
+    return sum(losses) / len(losses), act_mean, act_std
 
 
 def build_optimizer(model: GPT, tcfg: TrainConfig):
@@ -79,13 +95,32 @@ def train(mcfg: ModelConfig, tcfg: TrainConfig):
             (loss / tcfg.grad_accum).backward()
             accum_loss += loss.item() / tcfg.grad_accum
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), tcfg.grad_clip)
+        # snapshot params before step for update-to-weight ratio (eval steps only)
+        at_eval = (step % tcfg.eval_every == 0)
+        if at_eval:
+            with torch.no_grad():
+                param_snap = [p.data.clone() for p in model.parameters()]
+
+        grad_norm   = torch.nn.utils.clip_grad_norm_(model.parameters(), tcfg.grad_clip)
+        grad_clipped = int(grad_norm.item() > tcfg.grad_clip)
         optimizer.step()
 
         torch.cuda.synchronize()
         dt          = time.time() - t0
         tokens_seen = tcfg.batch_size * mcfg.block_size * tcfg.grad_accum
         tok_per_sec = tokens_seen / dt
+
+        # param norm — every step
+        with torch.no_grad():
+            param_norm = sum(p.data.norm().item() ** 2 for p in model.parameters()) ** 0.5
+
+        # update-to-weight ratio — eval steps only (param clone is expensive)
+        if at_eval:
+            with torch.no_grad():
+                upd_norm  = sum((p.data - s).norm().item() ** 2
+                                for p, s in zip(model.parameters(), param_snap)) ** 0.5
+                upd_ratio = upd_norm / (param_norm + 1e-8)
+            del param_snap
 
         # --- console log ---
         if step % tcfg.log_every == 0:
@@ -96,17 +131,22 @@ def train(mcfg: ModelConfig, tcfg: TrainConfig):
                 f"tok/s {tok_per_sec:,.0f} | ETA {eta_hours:.1f}h"
             )
 
-        # --- tensorboard ---
-        writer.add_scalar("loss/train",  accum_loss,  step)
-        writer.add_scalar("lr",          lr,          step)
-        writer.add_scalar("grad_norm",   grad_norm,   step)
-        writer.add_scalar("tok_per_sec", tok_per_sec, step)
+        # --- tensorboard (every step) ---
+        writer.add_scalar("loss/train",  accum_loss,   step)
+        writer.add_scalar("lr",          lr,           step)
+        writer.add_scalar("grad_norm",   grad_norm,    step)
+        writer.add_scalar("tok_per_sec", tok_per_sec,  step)
+        writer.add_scalar("param_norm",  param_norm,   step)
+        writer.add_scalar("grad_clipped", grad_clipped, step)
 
-        # --- val eval + checkpoint ---
-        if step % tcfg.eval_every == 0:
-            val_loss = eval_val_loss(model, val_set, tcfg)
+        # --- val eval + checkpoint (every eval_every steps) ---
+        if at_eval:
+            val_loss, act_mean, act_std = eval_val_loss(model, val_set, tcfg)
             print(f"  >>> val_loss {val_loss:.4f} @ step {step}")
-            writer.add_scalar("loss/val", val_loss, step)
+            writer.add_scalar("loss/val",              val_loss,  step)
+            writer.add_scalar("update_to_weight_ratio", upd_ratio, step)
+            writer.add_scalar("activation/mean",        act_mean,  step)
+            writer.add_scalar("activation/std",         act_std,   step)
             ckpt = {
                 "step":      step,
                 "val_loss":  val_loss,
