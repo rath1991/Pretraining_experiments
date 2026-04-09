@@ -18,18 +18,21 @@ class BinDataset:
         return len(self.data) - self.block_size
 
     def get_batch(self, batch_size: int, device: str):
-        # sample random start positions
-        ix = torch.randint(len(self), (batch_size,))
-        x = torch.stack([
+        # Sample random start positions — one per sequence in the batch
+        start_indices = torch.randint(len(self), (batch_size,))
+
+        # input_tokens: the token sequence fed into the model
+        input_tokens = torch.stack([
             torch.from_numpy(self.data[i : i + self.block_size].astype(np.int64))
-            for i in ix
+            for i in start_indices
         ])
-        # y is x shifted right by 1 — next-token prediction target
-        y = torch.stack([
+        # targets: the same window shifted right by 1 — the next-token prediction target.
+        # At each position t, the model must predict token t+1 given tokens 0..t.
+        targets = torch.stack([
             torch.from_numpy(self.data[i + 1 : i + 1 + self.block_size].astype(np.int64))
-            for i in ix
+            for i in start_indices
         ])
-        return x.to(device), y.to(device)
+        return input_tokens.to(device), targets.to(device)
 
 
 def get_datasets(data_dir: str, block_size: int):

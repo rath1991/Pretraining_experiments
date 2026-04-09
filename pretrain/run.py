@@ -5,6 +5,6 @@ from train import train
 torch.set_float32_matmul_precision("high")   # use TF32 on Ampere+ GPUs
 
 if __name__ == "__main__":
-    mcfg = ModelConfig()
-    tcfg = TrainConfig()
-    train(mcfg, tcfg)
+    model_cfg = ModelConfig()
+    train_cfg = TrainConfig()
+    train(model_cfg, train_cfg)
