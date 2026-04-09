@@ -33,6 +33,9 @@ class TrainConfig:
     # precision — bf16 uses tensor cores, ~3-5x faster than float32 on Blackwell
     bf16: bool = True
 
+    # optimizer
+    optimizer: str = "adamw"     # "adamw" or "adam"
+
     # logging & eval
     log_every:  int = 10         # print train loss every N steps
     eval_every: int = 100        # val loss every N steps (~19 evals across 1907 steps)

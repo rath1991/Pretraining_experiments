@@ -108,23 +108,35 @@ def _compute_update_ratio(model: GPT, pre_step_params: list) -> float:
 
 def build_optimizer(model: GPT, train_cfg: TrainConfig):
     """
-    AdamW with selective weight decay.
+    Adam or AdamW with selective weight decay.
     Weight decay is applied only to matrices (nn.Linear weights, embedding weights)
     because they have sufficient capacity to benefit from regularisation.
     Vectors (LayerNorm scale/bias, Linear bias) are excluded — decaying them
     shrinks learned scale parameters and harms training.
+    Adam ignores weight_decay entirely; the param groups are kept symmetric
+    so the rest of the training loop doesn't need to branch.
     """
     decay_params   = [p for p in model.parameters() if p.dim() >= 2]
     nodecay_params = [p for p in model.parameters() if p.dim() <  2]
-    param_groups = [
-        {"params": decay_params,   "weight_decay": train_cfg.weight_decay},
-        {"params": nodecay_params, "weight_decay": 0.0},
-    ]
-    return torch.optim.AdamW(
-        param_groups,
-        lr=train_cfg.max_lr,
-        betas=(train_cfg.beta1, train_cfg.beta2),
-    )
+
+    if train_cfg.optimizer == "adamw":
+        param_groups = [
+            {"params": decay_params,   "weight_decay": train_cfg.weight_decay},
+            {"params": nodecay_params, "weight_decay": 0.0},
+        ]
+        return torch.optim.AdamW(
+            param_groups,
+            lr=train_cfg.max_lr,
+            betas=(train_cfg.beta1, train_cfg.beta2),
+        )
+    elif train_cfg.optimizer == "adam":
+        return torch.optim.Adam(
+            model.parameters(),
+            lr=train_cfg.max_lr,
+            betas=(train_cfg.beta1, train_cfg.beta2),
+        )
+    else:
+        raise ValueError(f"Unknown optimizer: {train_cfg.optimizer!r}. Use 'adam' or 'adamw'.")
 
 
 def save_plots(history: dict, results_dir: str) -> None:
