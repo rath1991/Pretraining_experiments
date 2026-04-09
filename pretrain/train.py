@@ -2,6 +2,9 @@ import os
 import math
 import time
 import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 from config import ModelConfig, TrainConfig
 from data import get_datasets
@@ -124,9 +127,94 @@ def build_optimizer(model: GPT, train_cfg: TrainConfig):
     )
 
 
+def save_plots(history: dict, results_dir: str) -> None:
+    """
+    Saves one PNG per metric group to results_dir, overwriting on each call.
+    Called at every eval step so plots always reflect current training state.
+    """
+    os.makedirs(results_dir, exist_ok=True)
+
+    def _save(fname, fig):
+        fig.savefig(os.path.join(results_dir, fname), dpi=120, bbox_inches="tight")
+        plt.close(fig)
+
+    steps      = history["steps"]
+    val_steps  = history["val_steps"]
+
+    # ── loss ──────────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots()
+    ax.plot(steps, history["train_loss"], label="train", linewidth=0.8)
+    ax.plot(val_steps, history["val_loss"], label="val", linewidth=1.2, marker="o", markersize=3)
+    ax.set_xlabel("step"); ax.set_ylabel("loss"); ax.set_title("Loss")
+    ax.legend(); ax.grid(True, alpha=0.3)
+    _save("loss.png", fig)
+
+    # ── learning rate ─────────────────────────────────────────────────────────
+    fig, ax = plt.subplots()
+    ax.plot(steps, history["lr"], linewidth=0.8, color="orange")
+    ax.set_xlabel("step"); ax.set_ylabel("lr"); ax.set_title("Learning Rate")
+    ax.grid(True, alpha=0.3)
+    _save("lr.png", fig)
+
+    # ── gradient norm ─────────────────────────────────────────────────────────
+    fig, ax = plt.subplots()
+    ax.plot(steps, history["grad_norm"], linewidth=0.6, color="steelblue", label="grad_norm")
+    clip_steps = [s for s, c in zip(steps, history["grad_clipped"]) if c]
+    clip_norms = [history["grad_norm"][i] for i, c in enumerate(history["grad_clipped"]) if c]
+    if clip_steps:
+        ax.scatter(clip_steps, clip_norms, color="red", s=8, zorder=3, label="clipped")
+    ax.set_xlabel("step"); ax.set_ylabel("grad norm"); ax.set_title("Gradient Norm")
+    ax.legend(); ax.grid(True, alpha=0.3)
+    _save("grad_norm.png", fig)
+
+    # ── param norm ────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots()
+    ax.plot(steps, history["param_norm"], linewidth=0.8, color="purple")
+    ax.set_xlabel("step"); ax.set_ylabel("L2 norm"); ax.set_title("Parameter Norm")
+    ax.grid(True, alpha=0.3)
+    _save("param_norm.png", fig)
+
+    # ── update-to-weight ratio ────────────────────────────────────────────────
+    fig, ax = plt.subplots()
+    ax.plot(val_steps, history["update_ratio"], linewidth=1.0, color="darkorange", marker="o", markersize=3)
+    ax.axhline(1e-3, color="green",  linestyle="--", linewidth=0.8, label="ideal ~1e-3")
+    ax.axhline(1e-2, color="red",    linestyle="--", linewidth=0.8, label="high 1e-2")
+    ax.axhline(1e-4, color="gray",   linestyle="--", linewidth=0.8, label="low 1e-4")
+    ax.set_yscale("log"); ax.set_xlabel("step")
+    ax.set_ylabel("‖Δθ‖ / ‖θ‖"); ax.set_title("Update-to-Weight Ratio")
+    ax.legend(); ax.grid(True, alpha=0.3)
+    _save("update_ratio.png", fig)
+
+    # ── activations (ln_final) ────────────────────────────────────────────────
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(6, 5))
+    ax1.plot(val_steps, history["act_mean"], linewidth=1.0, color="teal", marker="o", markersize=3)
+    ax1.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    ax1.set_ylabel("mean"); ax1.set_title("ln_final Activations"); ax1.grid(True, alpha=0.3)
+    ax2.plot(val_steps, history["act_std"], linewidth=1.0, color="coral", marker="o", markersize=3)
+    ax2.axhline(1, color="gray", linestyle="--", linewidth=0.8)
+    ax2.set_ylabel("std"); ax2.set_xlabel("step"); ax2.grid(True, alpha=0.3)
+    plt.tight_layout()
+    _save("activations.png", fig)
+
+
 def train(model_cfg: ModelConfig, train_cfg: TrainConfig):
     os.makedirs(train_cfg.out_dir, exist_ok=True)
+    results_dir = os.path.join(train_cfg.out_dir, "results")
     writer = SummaryWriter(log_dir=os.path.join(train_cfg.out_dir, "tb_logs"))
+
+    history = {
+        "steps":       [],
+        "train_loss":  [],
+        "lr":          [],
+        "grad_norm":   [],
+        "grad_clipped":[],
+        "param_norm":  [],
+        "val_steps":   [],
+        "val_loss":    [],
+        "update_ratio":[],
+        "act_mean":    [],
+        "act_std":     [],
+    }
 
     train_set, val_set = get_datasets(train_cfg.data_dir, model_cfg.block_size)
 
@@ -217,6 +305,13 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig):
         writer.add_scalar("param_norm",   param_norm,       step)
         writer.add_scalar("grad_clipped", was_grad_clipped, step)
 
+        history["steps"].append(step)
+        history["train_loss"].append(train_loss)
+        history["lr"].append(current_lr)
+        history["grad_norm"].append(grad_norm.item())
+        history["grad_clipped"].append(bool(was_grad_clipped))
+        history["param_norm"].append(param_norm)
+
         # ── 9. Val eval + checkpoint (every eval_every steps) ─────────────────
         if is_eval_step:
             # Val loss averaged over eval_steps batches; act_mean/std from ln_final
@@ -232,6 +327,14 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig):
             writer.add_scalar("update_to_weight_ratio", update_weight_ratio, step)
             writer.add_scalar("activation/mean",        act_mean,            step)
             writer.add_scalar("activation/std",         act_std,             step)
+
+            history["val_steps"].append(step)
+            history["val_loss"].append(val_loss)
+            history["update_ratio"].append(update_weight_ratio)
+            history["act_mean"].append(act_mean)
+            history["act_std"].append(act_std)
+
+            save_plots(history, results_dir)
 
             ckpt = {
                 "step":       step,
