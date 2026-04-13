@@ -93,6 +93,17 @@ class GPT(nn.Module):
         # Rationale: token similarity in input space ≈ token similarity in output space.
         self.token_emb.weight = self.lm_head.weight
         self.apply(self._init_weights)
+        if cfg.scaled_init:
+            # Scale residual output projections by 1/sqrt(2*n_layer).
+            # Each block has two residual writes (attn out_proj + mlp fc_out),
+            # so total residual layers = 2*n_layer. This keeps residual stream
+            # variance O(1) w.r.t. depth instead of O(L).
+            scale = (2 * cfg.n_layer) ** -0.5
+            for module in self.modules():
+                if isinstance(module, CausalSelfAttention):
+                    nn.init.normal_(module.out_proj.weight, mean=0.0, std=0.02 * scale)
+                elif isinstance(module, MLP):
+                    nn.init.normal_(module.fc_out.weight, mean=0.0, std=0.02 * scale)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):

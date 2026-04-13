@@ -9,6 +9,7 @@ class ModelConfig:
     block_size: int   = 1024     # context length
     bias:       bool  = False    # no bias in linears or layernorms
     dropout:    float = 0.0      # pretraining: no dropout
+    scaled_init: bool = False    # GPT-2 scaled init: c_proj std *= 1/sqrt(2*n_layer)
 
 @dataclass
 class TrainConfig:
